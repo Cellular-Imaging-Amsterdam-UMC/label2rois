@@ -4,7 +4,13 @@ This is an OMERO.web script to convert grey scale label images into OMERO ROIs.<
 Depending on the python packages installed in the OMERO server virtual environment one can choose between Polygon or Mask as
 a Shape for the ROIs.<br>
 
-The script supports flexible label image locations, custom naming suffixes, and ROI management features for comparing different segmentation methods.
+The script supports flexible label image locations, explicit label/target image-ID pairs, custom naming suffixes, and ROI management features for comparing different segmentation methods.
+
+### Explicit image-ID mapping
+Automated clients can set `Mapping_Mode` to `Explicit Image IDs` and supply
+parallel `Label_Image_IDs` and `Target_Image_IDs` lists. IDs at the same list
+position form a pair. This bypasses filename matching and is the recommended
+integration contract for BIOMERO postprocessing.
 
 ## 2. Naming convention
 The script identifies label images by a customizable suffix (default: `-label`) in the filename.<br>
@@ -60,6 +66,9 @@ Here is the dependency tree (made with `pipdeptree`) for the `scikit-image` inst
 ## 4. Script Parameters
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `Mapping_Mode` | `Naming Convention` or `Explicit Image IDs` | Naming Convention |
+| `Label_Image_IDs` | Label image IDs used by explicit mode | - |
+| `Target_Image_IDs` | Target image IDs paired with `Label_Image_IDs` | - |
 | `Label_Suffix` | Suffix identifying label images | `-label` |
 | `Search_Mode` | Where to find labels: "Same Dataset" or "Specific Dataset" | Same Dataset |
 | `Label_Dataset_ID` | Dataset ID when using "Specific Dataset" mode | - |
@@ -76,4 +85,3 @@ The underlying function to create Mask ROIs though is independent of shape compl
 If you use the script and see room for improvement or have a special use case that is not covered by the generic code I wrote, please write an issue here at Github or contact me via mail or [Image.sc](https://forum.image.sc/).<br>
 I might implement some logic to artificially create a Polygon Shape from the Mask Shape the is created with `omero_rois` to better deal with complex ROI forms.<br>
 To make it more generic, there might also be the option to put in a regex pattern to determine the label images from the selection.
-

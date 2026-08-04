@@ -3,7 +3,7 @@
 
 import omero.scripts as scripts
 from omero.gateway import BlitzGateway
-from omero.rtypes import rstring, rlong
+from omero.rtypes import rint, rstring, rlong
 import ezomero as ez
 import numpy as np
 from omero.cmd import Delete2
@@ -32,12 +32,13 @@ def labels2rois(script_params, conn):
         conn: OMERO connection object
     
     Returns:
-        Tuple of (newRois, imagesProcessed)
+        Tuple of (newRois, imagesProcessed, warnings)
     """
-    input_type = script_params["Data_Type"]
-    input_ids = script_params["IDs"]
-    delete_label_image = script_params["Delete_Label_Image"]
-    algorithm = script_params["ROI_type"]
+    mapping_mode = script_params.get("Mapping_Mode", "Naming Convention")
+    input_type = script_params.get("Data_Type", "Dataset")
+    input_ids = script_params.get("IDs", [])
+    delete_label_image = script_params.get("Delete_Label_Image", False)
+    algorithm = script_params.get("ROI_type", "Polygon")
     
     label_suffix = script_params.get("Label_Suffix", "-label")
     label_dataset_id = script_params.get("Label_Dataset_ID", None)
@@ -47,8 +48,21 @@ def labels2rois(script_params, conn):
 
     new_rois = []
     images_processed = 0
+    warnings = []
 
-    if input_type == "Dataset":
+    if mapping_mode == "Explicit Image IDs":
+        new_rois, images_processed, warnings = process_explicit_image_pairs(
+            script_params.get("Label_Image_IDs", []),
+            script_params.get("Target_Image_IDs", []),
+            conn,
+            clear_rois,
+            clear_filter,
+            algorithm,
+            delete_label_image,
+        )
+    elif not input_ids:
+        raise ValueError("IDs must be provided when Mapping_Mode is 'Naming Convention'")
+    elif input_type == "Dataset":
         new_rois, images_processed = process_dataset_input(
             input_ids, conn, label_suffix, label_dataset_id, search_mode, 
             clear_rois, clear_filter, algorithm, delete_label_image
@@ -59,7 +73,63 @@ def labels2rois(script_params, conn):
             clear_rois, clear_filter, algorithm, delete_label_image
         )
 
-    return new_rois, images_processed
+    return new_rois, images_processed, warnings
+
+
+def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
+                                 clear_rois, clear_filter, algorithm,
+                                 delete_label_image):
+    """Create ROIs for explicit label-image to target-image ID pairs.
+
+    Pair-level errors are collected so one malformed result cannot prevent the
+    remaining workflow outputs from being processed.
+    """
+    label_image_ids = [int(image_id) for image_id in label_image_ids]
+    target_image_ids = [int(image_id) for image_id in target_image_ids]
+    if not label_image_ids:
+        raise ValueError("At least one Label_Image_ID must be provided")
+    if len(label_image_ids) != len(target_image_ids):
+        raise ValueError(
+            "Label_Image_IDs and Target_Image_IDs must contain the same number of IDs"
+        )
+
+    new_rois = []
+    images_processed = 0
+    warnings = []
+    cleared_targets = set()
+
+    for label_image_id, target_image_id in zip(label_image_ids, target_image_ids):
+        try:
+            label_image = conn.getObject("Image", label_image_id)
+            target_image = conn.getObject("Image", target_image_id)
+            if label_image is None:
+                raise ValueError(f"Label image {label_image_id} was not found")
+            if target_image is None:
+                raise ValueError(f"Target image {target_image_id} was not found")
+
+            if clear_rois and target_image_id not in cleared_targets:
+                filter_to_use = clear_filter if clear_filter.strip() else None
+                clear_existing_rois(target_image_id, conn, filter_to_use)
+                cleared_targets.add(target_image_id)
+
+            created_rois = process_single_label_image(
+                label_image,
+                target_image_id,
+                algorithm,
+                conn,
+                "-label",
+                delete_label_image,
+            )
+            new_rois.extend(created_rois)
+            images_processed += 1
+        except Exception as exc:
+            warning = (
+                f"Label image {label_image_id} -> target image {target_image_id}: {exc}"
+            )
+            print(f"!! Warning: {warning} !!")
+            warnings.append(warning)
+
+    return new_rois, images_processed, warnings
 
 
 def process_dataset_input(input_ids, conn, label_suffix, label_dataset_id, search_mode, 
@@ -101,21 +171,16 @@ def process_dataset_input(input_ids, conn, label_suffix, label_dataset_id, searc
                 print(f"Cleared {cleared_count} existing ROIs from target image {target_id}")
 
             for label_image in target_labels:
-                print(f"processing label image '{label_image.name}' from Dataset '{label_image.getAncestry()[0].name}'")
-
-                plane = get_label_image_as_array(label_image)
-                print(f"shape of plane z=0/t=0/c=0: {plane.shape}")
-                print(f"min: {plane.min()}, max: {plane.max()}, pixel type: {plane.dtype.name}")
-
-                contour_dict, contour_time = create_contours(plane, algorithm)
-                created_rois, roi_time = upload_rois(contour_dict, target_id, algorithm, conn, label_image, target_image, label_suffix)
+                created_rois = process_single_label_image(
+                    label_image,
+                    target_id,
+                    algorithm,
+                    conn,
+                    label_suffix,
+                    delete_label_image,
+                )
                 new_rois.extend(created_rois)
                 images_processed += 1
-
-                if delete_label_image:
-                    delete_image(label_image, conn)
-
-                print(f"{int(contour_time)}s to create contours and {int(roi_time)}s to upload ROIs")
 
     return new_rois, images_processed
 
@@ -160,22 +225,48 @@ def process_image_input(input_ids, conn, label_suffix, label_dataset_id, search_
 
 def process_single_label_image(label_image, target_id, algorithm, conn, label_suffix, delete_label_image):
     """Process a single label image to create ROIs."""
-    print(f"processing label image '{label_image.name}' from Dataset '{label_image.getAncestry()[0].name}'")
+    print(f"processing label image '{label_image.name}' for target image {target_id}")
 
-    plane = get_label_image_as_array(label_image)
-    print(f"shape of plane z=0/t=0/c=0: {plane.shape}")
-    print(f"min: {plane.min()}, max: {plane.max()}, pixel type: {plane.dtype.name}")
-
-    contour_dict, contour_time = create_contours(plane, algorithm)
-    
-    # Get the target image object for ROI naming
     target_image = conn.getObject("Image", target_id)
-    created_rois, roi_time = upload_rois(contour_dict, target_id, algorithm, conn, label_image, target_image, label_suffix)
+    if target_image is None:
+        raise ValueError(f"Target image {target_id} was not found")
+
+    label_pixels = label_image.getPrimaryPixels()
+    target_pixels = target_image.getPrimaryPixels()
+    size_z = min(label_pixels.getSizeZ(), target_pixels.getSizeZ())
+    size_t = min(label_pixels.getSizeT(), target_pixels.getSizeT())
+    created_rois = []
+
+    for z in range(size_z):
+        for t in range(size_t):
+            plane = get_label_image_as_array(label_image, z=z, t=t)
+            print(
+                f"shape of plane z={z}/t={t}/c=0: {plane.shape}; "
+                f"min: {plane.min()}, max: {plane.max()}, pixel type: {plane.dtype.name}"
+            )
+            contour_dict, contour_time = create_contours(plane, algorithm)
+            if not contour_dict:
+                continue
+            plane_rois, roi_time = upload_rois(
+                contour_dict,
+                target_id,
+                algorithm,
+                conn,
+                label_image,
+                target_image,
+                label_suffix,
+                z=z,
+                t=t,
+            )
+            created_rois.extend(plane_rois)
+            print(
+                f"{int(contour_time)}s to create contours and "
+                f"{int(roi_time)}s to upload ROIs for z={z}, t={t}"
+            )
 
     if delete_label_image:
         delete_image(label_image, conn)
 
-    print(f"{int(contour_time)}s to create contours and {int(roi_time)}s to upload ROIs")
     return created_rois
 
 
@@ -310,9 +401,9 @@ def clear_existing_rois(image_id, conn, roi_name_filter=None):
     return len(rois_to_delete)
 
 
-def get_label_image_as_array(image):
+def get_label_image_as_array(image, z=0, t=0):
     """Get the image as a numpy array."""
-    z, t, c = 0, 0, 0
+    c = 0
     pixels = image.getPrimaryPixels()
     return pixels.getPlane(z, c, t)
 
@@ -351,14 +442,10 @@ def create_contours(label_image, algorithm):
 def create_mask_contours(label_image):
     """Create mask-based contours."""
     contour_dict = {}
-    for i in range(1, label_image.max() + 1):
+    for i in get_label_values(label_image):
         mask = (label_image == i)
         contour = omeroi.mask_from_binary_image(mask, text=str(i))
         contour_dict[i] = contour
-    
-    assert len(contour_dict) == label_image.max(), \
-        f"Expected {label_image.max()} ROIs, found {len(contour_dict)}."
-    
     return contour_dict
 
 
@@ -367,7 +454,7 @@ def create_polygon_contours(label_image):
     contour_dict = {}
     multiple_contours = []
     
-    for i in range(1, label_image.max() + 1):
+    for i in get_label_values(label_image):
         mask = (label_image == i)
         cropped, x_offset, y_offset = get_cropped_mask(mask)
         
@@ -394,30 +481,42 @@ def create_polygon_contours(label_image):
     return contour_dict
 
 
-def upload_rois(contour_dict, parent_id, algorithm, conn, label_image, target_image, label_suffix="-label"):
+def get_label_values(label_image):
+    """Return the positive label values that are actually present."""
+    return [value.item() for value in np.unique(label_image) if value > 0]
+
+
+def upload_rois(contour_dict, parent_id, algorithm, conn, label_image,
+                target_image, label_suffix="-label", z=0, t=0):
     """Upload ROIs to OMERO."""
     start = time.time()
     new_rois = []
     
     # Get unique prefix from label filename
     roi_prefix = get_roi_name_prefix(label_image.name, target_image.name, label_suffix)
+    pixels = label_image.getPrimaryPixels()
+    if pixels.getSizeZ() > 1 or pixels.getSizeT() > 1:
+        roi_prefix = f"{roi_prefix}_z{z}_t{t}"
 
     if algorithm == "Mask":
-        new_rois = upload_mask_rois(contour_dict, parent_id, conn, roi_prefix)
+        new_rois = upload_mask_rois(contour_dict, parent_id, conn, roi_prefix, z, t)
     elif algorithm == "Polygon":
-        new_rois = upload_polygon_rois(contour_dict, parent_id, conn, roi_prefix)
+        new_rois = upload_polygon_rois(contour_dict, parent_id, conn, roi_prefix, z, t)
 
     roi_time = time.time() - start
     print(f"created new Rois: {new_rois}")
     return new_rois, roi_time
 
 
-def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix):
+def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
     """Upload mask-based ROIs."""
     new_rois = []
     update = conn.getUpdateService()
     
     for grey_value, shape in contour_dict.items():
+        shape.setTheZ(rint(z))
+        shape.setTheT(rint(t))
+        shape.setTheC(rint(0))
         roi = RoiI()
         roi.name = rstring(f"{clean_suffix}_{grey_value}")
         roi.image = conn.getObject("Image", parent_id)._obj
@@ -428,14 +527,14 @@ def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix):
     return new_rois
 
 
-def upload_polygon_rois(contour_dict, parent_id, conn, clean_suffix):
+def upload_polygon_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
     """Upload polygon-based ROIs."""
     new_rois = []
     
     for grey_value, coordinates in contour_dict.items():
         flipped = np.flip(coordinates)
         roi_name = f"{clean_suffix}_{grey_value}"
-        shape = [ez.rois.Polygon(flipped, label=roi_name)]
+        shape = [ez.rois.Polygon(flipped, z=z, c=0, t=t, label=roi_name)]
         roi_id = ez.post_roi(conn, int(parent_id), shape, name=roi_name)
         new_rois.append(roi_id)
     
@@ -566,26 +665,40 @@ def run_script():
     data_types = [rstring('Dataset'), rstring('Image')]
     shape_types = [rstring("Polygon"), rstring("Mask")]
     search_modes = [rstring("Same Dataset"), rstring("Specific Dataset")]
+    mapping_modes = [rstring("Naming Convention"), rstring("Explicit Image IDs")]
 
     client = scripts.client(
         'Labels2Rois',
         """
         Creates (named) ROIs from label images.
         
-        For correct mapping of the ROIs, the label image must have
-        the same name as the target image and contain the specified suffix
-        (default: '-label'). Label images can be in the same dataset
-        or a specific dataset. Optionally clear existing ROIs.
+        Label images can be matched to target images by naming convention or
+        supplied as explicit label-image/target-image ID pairs. Label images
+        can be in the same dataset or a specific dataset. Optionally clear
+        existing ROIs.
         """,
 
         scripts.String(
-            "Data_Type", optional=False, grouping="1",
+            "Mapping_Mode", optional=False, grouping="0",
+            description="Use naming conventions or explicit image ID pairs",
+            values=mapping_modes, default="Naming Convention"),
+
+        scripts.String(
+            "Data_Type", optional=True, grouping="1",
             description="Choose source of label images",
             values=data_types, default="Dataset"),
 
         scripts.List(
-            "IDs", optional=False, grouping="2",
+            "IDs", optional=True, grouping="2",
             description="List of IDs").ofType(rlong(0)),
+
+        scripts.List(
+            "Label_Image_IDs", optional=True, grouping="2.1",
+            description="Label image IDs for Explicit Image IDs mode").ofType(rlong(0)),
+
+        scripts.List(
+            "Target_Image_IDs", optional=True, grouping="2.2",
+            description="Target image IDs paired by position with Label_Image_IDs").ofType(rlong(0)),
 
         scripts.String(
             "ROI_type", optional=False, grouping="3",
@@ -619,14 +732,16 @@ def run_script():
 
         authors=["Jens Wendt"],
         contact="https://forum.image.sc/tag/omero, jens.wendt@uni-muenster.de",
-        version="0.5"
+        version="0.6"
     )
 
     try:
         script_params = client.getInputs(unwrap=True)
         conn = BlitzGateway(client_obj=client)
-        new_rois, images_processed = labels2rois(script_params, conn)
+        new_rois, images_processed, warnings = labels2rois(script_params, conn)
         message = f"created {len(new_rois)} ROIs in {images_processed} images"
+        if warnings:
+            message += f"; {len(warnings)} pair(s) skipped: " + " | ".join(warnings)
         client.setOutput("Message", rstring(message))
     finally:
         client.closeSession()
