@@ -231,4 +231,7 @@ def test_mask_shapes_are_attached_to_the_processed_plane(monkeypatch):
     shape.setTheZ.assert_called_once_with(2)
     shape.setTheT.assert_called_once_with(3)
     shape.setTheC.assert_called_once_with(0)
+    shape.setTextValue.assert_called_once_with("cells_7")
+    saved = update.saveAndReturnObject.call_args.args[0]
+    assert saved.name == "cells_7"
     assert roi_ids == [501]

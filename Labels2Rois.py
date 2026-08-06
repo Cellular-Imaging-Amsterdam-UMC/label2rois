@@ -526,11 +526,13 @@ def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
     update = conn.getUpdateService()
     
     for grey_value, shape in contour_dict.items():
+        roi_name = f"{clean_suffix}_{grey_value}"
         shape.setTheZ(rint(z))
         shape.setTheT(rint(t))
         shape.setTheC(rint(0))
+        shape.setTextValue(rstring(roi_name))
         roi = RoiI()
-        roi.name = rstring(f"{clean_suffix}_{grey_value}")
+        roi.name = rstring(roi_name)
         roi.image = conn.getObject("Image", parent_id)._obj
         roi.addShape(shape)
         roi = update.saveAndReturnObject(roi)
