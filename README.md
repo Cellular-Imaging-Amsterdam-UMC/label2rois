@@ -70,6 +70,7 @@ Here is the dependency tree (made with `pipdeptree`) for the `scikit-image` inst
 | `Label_Image_IDs` | Label image IDs used by explicit mode | - |
 | `Target_Image_IDs` | Target image IDs paired with `Label_Image_IDs` | - |
 | `Label_Suffix` | Suffix identifying label images | `-label` |
+| `ROI_Name_Prefix` | Optional prefix applied to every created ROI name; useful for workflow/run provenance and later filtering | - |
 | `Search_Mode` | Where to find labels: "Same Dataset" or "Specific Dataset" | Same Dataset |
 | `Label_Dataset_ID` | Dataset ID when using "Specific Dataset" mode | - |
 | `Clear_Existing_ROIs` | Remove existing ROIs before adding new ones | False |

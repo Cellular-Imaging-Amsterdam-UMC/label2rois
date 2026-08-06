@@ -45,6 +45,7 @@ def labels2rois(script_params, conn):
     search_mode = script_params.get("Search_Mode", "Same Dataset")
     clear_rois = script_params.get("Clear_Existing_ROIs", False)
     clear_filter = script_params.get("Clear_ROI_Filter", "")
+    roi_name_prefix = script_params.get("ROI_Name_Prefix", "")
 
     new_rois = []
     images_processed = 0
@@ -59,6 +60,7 @@ def labels2rois(script_params, conn):
             clear_filter,
             algorithm,
             delete_label_image,
+            roi_name_prefix,
         )
     elif not input_ids:
         raise ValueError("IDs must be provided when Mapping_Mode is 'Naming Convention'")
@@ -78,7 +80,7 @@ def labels2rois(script_params, conn):
 
 def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
                                  clear_rois, clear_filter, algorithm,
-                                 delete_label_image):
+                                 delete_label_image, roi_name_prefix=""):
     """Create ROIs for explicit label-image to target-image ID pairs.
 
     Pair-level errors are collected so one malformed result cannot prevent the
@@ -119,6 +121,7 @@ def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
                 conn,
                 "-label",
                 delete_label_image,
+                roi_name_prefix=roi_name_prefix,
             )
             new_rois.extend(created_rois)
             images_processed += 1
@@ -223,7 +226,9 @@ def process_image_input(input_ids, conn, label_suffix, label_dataset_id, search_
     return new_rois, images_processed
 
 
-def process_single_label_image(label_image, target_id, algorithm, conn, label_suffix, delete_label_image):
+def process_single_label_image(label_image, target_id, algorithm, conn,
+                               label_suffix, delete_label_image,
+                               roi_name_prefix=""):
     """Process a single label image to create ROIs."""
     print(f"processing label image '{label_image.name}' for target image {target_id}")
 
@@ -257,6 +262,7 @@ def process_single_label_image(label_image, target_id, algorithm, conn, label_su
                 label_suffix,
                 z=z,
                 t=t,
+                roi_name_prefix=roi_name_prefix,
             )
             created_rois.extend(plane_rois)
             print(
@@ -487,13 +493,19 @@ def get_label_values(label_image):
 
 
 def upload_rois(contour_dict, parent_id, algorithm, conn, label_image,
-                target_image, label_suffix="-label", z=0, t=0):
+                target_image, label_suffix="-label", z=0, t=0,
+                roi_name_prefix=""):
     """Upload ROIs to OMERO."""
     start = time.time()
     new_rois = []
     
     # Get unique prefix from label filename
-    roi_prefix = get_roi_name_prefix(label_image.name, target_image.name, label_suffix)
+    derived_prefix = get_roi_name_prefix(
+        label_image.name, target_image.name, label_suffix)
+    roi_prefix = (
+        f"{roi_name_prefix}__{derived_prefix}"
+        if roi_name_prefix else derived_prefix
+    )
     pixels = label_image.getPrimaryPixels()
     if pixels.getSizeZ() > 1 or pixels.getSizeT() > 1:
         roi_prefix = f"{roi_prefix}_z{z}_t{t}"
@@ -718,6 +730,13 @@ def run_script():
             "Label_Suffix", optional=True, grouping="5", default="-label",
             description="Suffix that identifies label images (default: '-label')"),
 
+        scripts.String(
+            "ROI_Name_Prefix", optional=True, grouping="5.1", default="",
+            description=(
+                "Optional ROI name prefix for provenance and filtering. "
+                "Explicit-ID integrations can use a workflow name and run UUID."
+            )),
+
         scripts.Bool(
             "Clear_Existing_ROIs", optional=False, grouping="6", default=False,
             description="Delete existing ROIs before adding new ones"),
@@ -732,7 +751,7 @@ def run_script():
 
         authors=["Jens Wendt"],
         contact="https://forum.image.sc/tag/omero, jens.wendt@uni-muenster.de",
-        version="0.6"
+        version="0.7"
     )
 
     try:

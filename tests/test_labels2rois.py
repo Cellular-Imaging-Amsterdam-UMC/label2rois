@@ -58,7 +58,7 @@ def test_explicit_pairs_continue_after_pair_failure(monkeypatch):
     conn = Mock()
     conn.getObject.side_effect = lambda object_type, image_id: images.get(image_id)
 
-    def process(label_image, target_id, *args):
+    def process(label_image, target_id, *args, **kwargs):
         if target_id == 21:
             raise RuntimeError("bad label image")
         return [901, 902]
@@ -73,6 +73,34 @@ def test_explicit_pairs_continue_after_pair_failure(monkeypatch):
     assert processed == 1
     assert len(warnings) == 1
     assert "11 -> target image 21" in warnings[0]
+
+
+def test_explicit_pairs_forward_provenance_prefix(monkeypatch):
+    images = {
+        11: Mock(name="label-11"),
+        21: Mock(name="target-21"),
+    }
+    conn = Mock()
+    conn.getObject.side_effect = lambda object_type, image_id: images.get(image_id)
+    calls = []
+
+    def process(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [901]
+
+    monkeypatch.setattr(labels, "process_single_label_image", process)
+
+    rois, processed, warnings = labels.process_explicit_image_pairs(
+        [11], [21], conn, False, "", "Polygon", False,
+        "cellpose__11111111-2222-3333-4444-555555555555",
+    )
+
+    assert rois == [901]
+    assert processed == 1
+    assert warnings == []
+    assert calls[0][1]["roi_name_prefix"] == (
+        "cellpose__11111111-2222-3333-4444-555555555555"
+    )
 
 
 def test_process_single_label_image_preserves_z_and_t(monkeypatch):
@@ -118,6 +146,70 @@ def test_process_single_label_image_preserves_z_and_t(monkeypatch):
 
     assert uploads == [(0, 0), (0, 1), (1, 0), (1, 1)]
     assert rois == [101, 102, 103, 104]
+
+
+def test_process_single_label_image_uses_provenance_prefix(monkeypatch):
+    pixels = Mock()
+    pixels.getSizeZ.return_value = 1
+    pixels.getSizeT.return_value = 1
+    pixels.getPlane.return_value = np.array([[0, 1], [0, 0]])
+    label_image = Mock()
+    label_image.name = "source-label.tif"
+    label_image.getPrimaryPixels.return_value = pixels
+    target_image = Mock()
+    target_image.name = "source.tif"
+    target_image.getPrimaryPixels.return_value = pixels
+    conn = Mock()
+    conn.getObject.return_value = target_image
+
+    monkeypatch.setattr(
+        labels,
+        "create_contours",
+        lambda plane, algorithm: ({1: [[0, 0], [1, 0], [1, 1]]}, 0),
+    )
+    prefixes = []
+
+    def upload(*args, **kwargs):
+        prefixes.append(kwargs["roi_name_prefix"])
+        return [101], 0
+
+    monkeypatch.setattr(labels, "upload_rois", upload)
+
+    labels.process_single_label_image(
+        label_image, 21, "Polygon", conn, "-label", False,
+        roi_name_prefix="cellpose__run-uuid",
+    )
+
+    assert prefixes == ["cellpose__run-uuid"]
+
+
+def test_upload_rois_combines_provenance_and_label_prefix(monkeypatch):
+    label_image = Mock()
+    label_image.name = "source-label.tif"
+    label_image.getPrimaryPixels.return_value.getSizeZ.return_value = 1
+    label_image.getPrimaryPixels.return_value.getSizeT.return_value = 1
+    target_image = Mock()
+    target_image.name = "source.tif"
+    prefixes = []
+
+    def upload(contours, parent_id, conn, clean_suffix, z, t):
+        prefixes.append(clean_suffix)
+        return [501]
+
+    monkeypatch.setattr(labels, "upload_polygon_rois", upload)
+
+    roi_ids, _ = labels.upload_rois(
+        {1: [[0, 0], [1, 0], [1, 1]]},
+        21,
+        "Polygon",
+        Mock(),
+        label_image,
+        target_image,
+        roi_name_prefix="cellpose__run-uuid",
+    )
+
+    assert prefixes == ["cellpose__run-uuid__label"]
+    assert roi_ids == [501]
 
 
 def test_mask_shapes_are_attached_to_the_processed_plane(monkeypatch):
