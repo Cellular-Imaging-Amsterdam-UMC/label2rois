@@ -1,5 +1,5 @@
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -39,6 +39,13 @@ def test_get_label_values_supports_sparse_labels():
     image = np.array([[0, 2, 2], [1000, 0, 1000]], dtype=np.uint16)
 
     assert labels.get_label_values(image) == [2, 1000]
+
+
+def test_parse_roi_color_accepts_html_rgb_and_rejects_other_values():
+    assert labels.parse_roi_color("") is None
+    assert labels.parse_roi_color("#4e79a7") == (78, 121, 167)
+    with pytest.raises(ValueError, match="#RRGGBB"):
+        labels.parse_roi_color("blue")
 
 
 def test_explicit_pair_lists_must_have_equal_lengths():
@@ -101,6 +108,23 @@ def test_explicit_pairs_forward_provenance_prefix(monkeypatch):
     assert calls[0][1]["roi_name_prefix"] == (
         "cellpose__11111111-2222-3333-4444-555555555555"
     )
+
+
+def test_explicit_pairs_forward_roi_color(monkeypatch):
+    images = {11: Mock(name="label-11"), 21: Mock(name="target-21")}
+    conn = Mock()
+    conn.getObject.side_effect = lambda object_type, image_id: images.get(image_id)
+    calls = []
+    monkeypatch.setattr(
+        labels, "process_single_label_image",
+        lambda *args, **kwargs: calls.append(kwargs) or [901])
+
+    labels.process_explicit_image_pairs(
+        [11], [21], conn, False, "", "Mask", False,
+        roi_color=(78, 121, 167),
+    )
+
+    assert calls[0]["roi_color"] == (78, 121, 167)
 
 
 def test_process_single_label_image_preserves_z_and_t(monkeypatch):
@@ -192,7 +216,7 @@ def test_upload_rois_combines_provenance_and_label_prefix(monkeypatch):
     target_image.name = "source.tif"
     prefixes = []
 
-    def upload(contours, parent_id, conn, clean_suffix, z, t):
+    def upload(contours, parent_id, conn, clean_suffix, z, t, roi_color=None):
         prefixes.append(clean_suffix)
         return [501]
 
@@ -232,6 +256,48 @@ def test_mask_shapes_are_attached_to_the_processed_plane(monkeypatch):
     shape.setTheT.assert_called_once_with(3)
     shape.setTheC.assert_called_once_with(0)
     shape.setTextValue.assert_called_once_with("cells_7")
+    shape.setFillColor.assert_not_called()
     saved = update.saveAndReturnObject.call_args.args[0]
     assert saved.name == "cells_7"
+    assert roi_ids == [501]
+
+
+def test_mask_shape_uses_translucent_explicit_fill_color(monkeypatch):
+    shape = Mock()
+    saved_roi = Mock()
+    saved_roi.id.val = 501
+    update = Mock()
+    update.saveAndReturnObject.return_value = saved_roi
+    conn = Mock()
+    conn.getUpdateService.return_value = update
+    conn.getObject.return_value = Mock()
+    monkeypatch.setattr(labels, "RoiI", Mock)
+
+    labels.upload_mask_rois(
+        {7: shape}, 21, conn, "cells", roi_color=(225, 87, 89))
+
+    expected = labels.rgba_to_int(225, 87, 89, labels.MASK_FILL_ALPHA)
+    shape.setFillColor.assert_called_once_with(expected)
+
+
+def test_polygon_shape_uses_explicit_fill_and_stroke_colors(monkeypatch):
+    created = []
+
+    def polygon(points, **kwargs):
+        created.append(kwargs)
+        return Mock()
+
+    monkeypatch.setattr(labels.ez, "rois", SimpleNamespace(Polygon=polygon),
+                        raising=False)
+    monkeypatch.setattr(labels.ez, "post_roi", lambda *args, **kwargs: 501,
+                        raising=False)
+
+    roi_ids = labels.upload_polygon_rois(
+        {7: [[0, 0], [1, 0], [1, 1]]}, 21, Mock(), "cells",
+        roi_color=(78, 121, 167),
+    )
+
+    assert created[0]["fill_color"] == (78, 121, 167, labels.POLYGON_FILL_ALPHA)
+    assert created[0]["stroke_color"] == (
+        78, 121, 167, labels.POLYGON_STROKE_ALPHA)
     assert roi_ids == [501]

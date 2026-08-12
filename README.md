@@ -71,6 +71,7 @@ Here is the dependency tree (made with `pipdeptree`) for the `scikit-image` inst
 | `Target_Image_IDs` | Target image IDs paired with `Label_Image_IDs` | - |
 | `Label_Suffix` | Suffix identifying label images | `-label` |
 | `ROI_Name_Prefix` | Optional prefix applied to every created ROI name; useful for workflow/run provenance and later filtering | - |
+| `ROI_Color` | Optional shape color in `#RRGGBB` format. Masks receive a translucent fill; polygons receive a subtle fill and opaque outline. Blank retains the OMERO viewer default | - |
 | `Search_Mode` | Where to find labels: "Same Dataset" or "Specific Dataset" | Same Dataset |
 | `Label_Dataset_ID` | Dataset ID when using "Specific Dataset" mode | - |
 | `Clear_Existing_ROIs` | Remove existing ROIs before adding new ones | False |

@@ -10,6 +10,7 @@ from omero.cmd import Delete2
 from omero.model import RoiI
 import time
 from collections import deque
+import re
 import sys
 
 try:
@@ -21,6 +22,28 @@ try:
     import omero_rois as omeroi
 except ImportError:
     print("!! Could not find python package 'omero_rois' !!\n+++++++++++++++++")
+
+
+ROI_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
+MASK_FILL_ALPHA = 96
+POLYGON_FILL_ALPHA = 32
+POLYGON_STROKE_ALPHA = 255
+
+
+def parse_roi_color(value):
+    """Parse an optional HTML RGB color into an ``(r, g, b)`` tuple."""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if not ROI_COLOR_PATTERN.fullmatch(value):
+        raise ValueError("ROI_Color must be empty or use #RRGGBB format")
+    return tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
+
+
+def rgba_to_int(red, green, blue, alpha):
+    """Encode RGBA as the signed 32-bit integer used by OMERO Shapes."""
+    value = (red << 24) | (green << 16) | (blue << 8) | alpha
+    return value - 2 ** 32 if value > 2 ** 31 - 1 else value
 
 
 def labels2rois(script_params, conn):
@@ -46,6 +69,7 @@ def labels2rois(script_params, conn):
     clear_rois = script_params.get("Clear_Existing_ROIs", False)
     clear_filter = script_params.get("Clear_ROI_Filter", "")
     roi_name_prefix = script_params.get("ROI_Name_Prefix", "")
+    roi_color = parse_roi_color(script_params.get("ROI_Color", ""))
 
     new_rois = []
     images_processed = 0
@@ -61,18 +85,21 @@ def labels2rois(script_params, conn):
             algorithm,
             delete_label_image,
             roi_name_prefix,
+            roi_color,
         )
     elif not input_ids:
         raise ValueError("IDs must be provided when Mapping_Mode is 'Naming Convention'")
     elif input_type == "Dataset":
         new_rois, images_processed = process_dataset_input(
             input_ids, conn, label_suffix, label_dataset_id, search_mode, 
-            clear_rois, clear_filter, algorithm, delete_label_image
+            clear_rois, clear_filter, algorithm, delete_label_image,
+            roi_name_prefix, roi_color
         )
     elif input_type == "Image":
         new_rois, images_processed = process_image_input(
             input_ids, conn, label_suffix, label_dataset_id, search_mode,
-            clear_rois, clear_filter, algorithm, delete_label_image
+            clear_rois, clear_filter, algorithm, delete_label_image,
+            roi_name_prefix, roi_color
         )
 
     return new_rois, images_processed, warnings
@@ -80,7 +107,8 @@ def labels2rois(script_params, conn):
 
 def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
                                  clear_rois, clear_filter, algorithm,
-                                 delete_label_image, roi_name_prefix=""):
+                                 delete_label_image, roi_name_prefix="",
+                                 roi_color=None):
     """Create ROIs for explicit label-image to target-image ID pairs.
 
     Pair-level errors are collected so one malformed result cannot prevent the
@@ -122,6 +150,7 @@ def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
                 "-label",
                 delete_label_image,
                 roi_name_prefix=roi_name_prefix,
+                roi_color=roi_color,
             )
             new_rois.extend(created_rois)
             images_processed += 1
@@ -136,7 +165,8 @@ def process_explicit_image_pairs(label_image_ids, target_image_ids, conn,
 
 
 def process_dataset_input(input_ids, conn, label_suffix, label_dataset_id, search_mode, 
-                         clear_rois, clear_filter, algorithm, delete_label_image):
+                         clear_rois, clear_filter, algorithm, delete_label_image,
+                         roi_name_prefix="", roi_color=None):
     """Process dataset input to create ROIs from label images."""
     new_rois = []
     images_processed = 0
@@ -181,6 +211,8 @@ def process_dataset_input(input_ids, conn, label_suffix, label_dataset_id, searc
                     conn,
                     label_suffix,
                     delete_label_image,
+                    roi_name_prefix=roi_name_prefix,
+                    roi_color=roi_color,
                 )
                 new_rois.extend(created_rois)
                 images_processed += 1
@@ -189,7 +221,8 @@ def process_dataset_input(input_ids, conn, label_suffix, label_dataset_id, searc
 
 
 def process_image_input(input_ids, conn, label_suffix, label_dataset_id, search_mode,
-                       clear_rois, clear_filter, algorithm, delete_label_image):
+                       clear_rois, clear_filter, algorithm, delete_label_image,
+                       roi_name_prefix="", roi_color=None):
     """Process individual image input to create ROIs from corresponding label images."""
     new_rois = []
     images_processed = 0
@@ -218,7 +251,9 @@ def process_image_input(input_ids, conn, label_suffix, label_dataset_id, search_
             clear_existing_rois(target_image.id, conn, filter_to_use)
 
         roi_count = process_single_label_image(
-            label_image, target_image.id, algorithm, conn, label_suffix, delete_label_image
+            label_image, target_image.id, algorithm, conn, label_suffix,
+            delete_label_image, roi_name_prefix=roi_name_prefix,
+            roi_color=roi_color
         )
         new_rois.extend(roi_count)
         images_processed += 1
@@ -228,7 +263,7 @@ def process_image_input(input_ids, conn, label_suffix, label_dataset_id, search_
 
 def process_single_label_image(label_image, target_id, algorithm, conn,
                                label_suffix, delete_label_image,
-                               roi_name_prefix=""):
+                               roi_name_prefix="", roi_color=None):
     """Process a single label image to create ROIs."""
     print(f"processing label image '{label_image.name}' for target image {target_id}")
 
@@ -263,6 +298,7 @@ def process_single_label_image(label_image, target_id, algorithm, conn,
                 z=z,
                 t=t,
                 roi_name_prefix=roi_name_prefix,
+                roi_color=roi_color,
             )
             created_rois.extend(plane_rois)
             print(
@@ -494,7 +530,7 @@ def get_label_values(label_image):
 
 def upload_rois(contour_dict, parent_id, algorithm, conn, label_image,
                 target_image, label_suffix="-label", z=0, t=0,
-                roi_name_prefix=""):
+                roi_name_prefix="", roi_color=None):
     """Upload ROIs to OMERO."""
     start = time.time()
     new_rois = []
@@ -511,16 +547,19 @@ def upload_rois(contour_dict, parent_id, algorithm, conn, label_image,
         roi_prefix = f"{roi_prefix}_z{z}_t{t}"
 
     if algorithm == "Mask":
-        new_rois = upload_mask_rois(contour_dict, parent_id, conn, roi_prefix, z, t)
+        new_rois = upload_mask_rois(
+            contour_dict, parent_id, conn, roi_prefix, z, t, roi_color)
     elif algorithm == "Polygon":
-        new_rois = upload_polygon_rois(contour_dict, parent_id, conn, roi_prefix, z, t)
+        new_rois = upload_polygon_rois(
+            contour_dict, parent_id, conn, roi_prefix, z, t, roi_color)
 
     roi_time = time.time() - start
     print(f"created new Rois: {new_rois}")
     return new_rois, roi_time
 
 
-def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
+def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0,
+                     roi_color=None):
     """Upload mask-based ROIs."""
     new_rois = []
     update = conn.getUpdateService()
@@ -531,6 +570,9 @@ def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
         shape.setTheT(rint(t))
         shape.setTheC(rint(0))
         shape.setTextValue(rstring(roi_name))
+        if roi_color:
+            shape.setFillColor(rint(rgba_to_int(
+                *roi_color, MASK_FILL_ALPHA)))
         roi = RoiI()
         roi.name = rstring(roi_name)
         roi.image = conn.getObject("Image", parent_id)._obj
@@ -541,14 +583,22 @@ def upload_mask_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
     return new_rois
 
 
-def upload_polygon_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0):
+def upload_polygon_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0,
+                        roi_color=None):
     """Upload polygon-based ROIs."""
     new_rois = []
     
     for grey_value, coordinates in contour_dict.items():
         flipped = np.flip(coordinates)
         roi_name = f"{clean_suffix}_{grey_value}"
-        shape = [ez.rois.Polygon(flipped, z=z, c=0, t=t, label=roi_name)]
+        shape_options = {}
+        if roi_color:
+            shape_options = {
+                "fill_color": (*roi_color, POLYGON_FILL_ALPHA),
+                "stroke_color": (*roi_color, POLYGON_STROKE_ALPHA),
+            }
+        shape = [ez.rois.Polygon(
+            flipped, z=z, c=0, t=t, label=roi_name, **shape_options)]
         roi_id = ez.post_roi(conn, int(parent_id), shape, name=roi_name)
         new_rois.append(roi_id)
     
@@ -739,6 +789,14 @@ def run_script():
                 "Explicit-ID integrations can use a workflow name and run UUID."
             )),
 
+        scripts.String(
+            "ROI_Color", optional=True, grouping="5.2", default="",
+            description=(
+                "Optional shape color in #RRGGBB format. Masks use a "
+                "translucent fill; polygons use the color for their outline. "
+                "Leave empty to retain the OMERO viewer default."
+            )),
+
         scripts.Bool(
             "Clear_Existing_ROIs", optional=False, grouping="6", default=False,
             description="Delete existing ROIs before adding new ones"),
@@ -753,7 +811,7 @@ def run_script():
 
         authors=["Jens Wendt"],
         contact="https://forum.image.sc/tag/omero, jens.wendt@uni-muenster.de",
-        version="0.7"
+        version="0.8"
     )
 
     try:
