@@ -4,13 +4,22 @@ This is an OMERO.web script to convert grey scale label images into OMERO ROIs.<
 Depending on the python packages installed in the OMERO server virtual environment one can choose between Polygon or Mask as
 a Shape for the ROIs.<br>
 
-The script supports flexible label image locations, custom naming suffixes, and ROI management features for comparing different segmentation methods.
+The script supports flexible label image locations, explicit label/target image-ID pairs, custom naming suffixes, and ROI management features for comparing different segmentation methods.
+
+### Explicit image-ID mapping
+Automated clients can set `Mapping_Mode` to `Explicit Image IDs` and supply
+parallel `Label_Image_IDs` and `Target_Image_IDs` lists. IDs at the same list
+position form a pair. This bypasses filename matching.
+
+### Label image behavior
+Labels are read from channel `C=0`. Every distinct value greater than zero becomes one ROI on each processed Z/T plane; zero and negative values are treated as background.<br>
+The script processes the Z and T ranges shared by the label and target images. Mask Shapes preserve the complete segmented pixel region, while Polygon Shapes keep the largest contour when a label value has disconnected regions.
 
 ## 2. Naming convention
 The script identifies label images by a customizable suffix (default: `-label`) in the filename.<br>
 **Examples:**
 - `cells.ome.tiff` → `cells-label.ome.tiff`
-- `experiment.tif` → `experiment_nuclei.tif` (with suffix `_nuclei`)  
+- `experiment.tif` → `experiment_nuclei.tif` (with suffix `_nuclei`)
 - `test.tif` → `test.tif.0.tif` (with suffix `.tif.0`)
 
 ### 2.1 Label Image Locations
@@ -19,16 +28,23 @@ Label images can be located in:
 - **Specific Dataset**: Search for labels in a different dataset by providing its ID
 
 ### 2.2 ROI Naming
-Created ROIs are named using the label suffix and grey value: `{suffix}_{number}`
+Created ROIs are named using the derived label name and grey value: `[ROI_Name_Prefix__]{derived-label-part}[_z{Z}_t{T}]_{number}`
 - `cells_cellpose.tif` → ROIs: `cellpose_1`, `cellpose_2`...
 - `nuclei-stardist.png` → ROIs: `stardist_1`, `stardist_2`...
+- With `ROI_Name_Prefix=cellpose__run-uuid`: `cellpose__run-uuid__cellpose_1`...
 
-This allows easy comparison of different segmentation methods on the same image.
+The optional Z/T part is only added for multi-plane label images. This allows easy comparison and filtering of different segmentation methods or runs on the same image.
 
 ### 2.3 ROI Management
 Optionally clear existing ROIs before adding new ones:
 - **Clear All**: Remove all existing ROIs
-- **Selective**: Only remove ROIs containing specific text (e.g., "cellpose")
+- **Selective**: Only remove ROIs containing specific text (e.g., "cellpose"). The filter is a case-sensitive substring.
+
+Existing ROIs are kept by default. An empty filter clears all existing ROIs when clearing is enabled.
+
+### 2.4 ROI Colors and Label Cleanup
+`ROI_Color` optionally stores a color on every created Shape using `#RRGGBB` notation. Masks use a translucent fill; polygons use a subtle fill and opaque outline. Leaving it empty retains the OMERO viewer default.<br>
+`Delete_Label_Image` optionally deletes the label Image object from OMERO after successful conversion. It is disabled by default and does not delete data outside OMERO.
 
 ## 3. Package dependencies
 For the creation of the `Polygon` ROIs I rely on [ezomero](https://github.com/TheJacksonLaboratory/ezomero), a fantastic toolbox to make life easier for OMERO devs.<br>
@@ -60,15 +76,23 @@ Here is the dependency tree (made with `pipdeptree`) for the `scikit-image` inst
 ## 4. Script Parameters
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `Mapping_Mode` | `Naming Convention` or `Explicit Image IDs` | Naming Convention |
+| `Data_Type` | Type represented by `IDs` in naming mode: `Dataset` or `Image` | Dataset |
+| `IDs` | Dataset or target Image IDs used by naming mode | - |
+| `Label_Image_IDs` | Label image IDs used by explicit mode | - |
+| `Target_Image_IDs` | Target image IDs paired with `Label_Image_IDs` | - |
+| `ROI_type` | Shape type: `Polygon` or `Mask` | Polygon |
 | `Label_Suffix` | Suffix identifying label images | `-label` |
+| `ROI_Name_Prefix` | Optional prefix applied to every created ROI name; useful for provenance and later filtering | - |
+| `ROI_Color` | Optional Shape color in `#RRGGBB` format; blank retains the OMERO viewer default | - |
 | `Search_Mode` | Where to find labels: "Same Dataset" or "Specific Dataset" | Same Dataset |
 | `Label_Dataset_ID` | Dataset ID when using "Specific Dataset" mode | - |
 | `Clear_Existing_ROIs` | Remove existing ROIs before adding new ones | False |
-| `Clear_ROI_Filter` | Only remove ROIs containing this text | - |
+| `Clear_ROI_Filter` | Case-sensitive name substring limiting which ROIs are removed; blank means all | - |
+| `Delete_Label_Image` | Delete label Images from OMERO after successful conversion | False |
 
 ## 5. Caveats
-- At the moment the input Data type is limited to Datasets and Images.<br>
-This can easily expanded in the future if the need arises, just contact the author via mail or image.sc.<br>
+- In Naming Convention mode the input Data type is limited to Datasets and Images. Explicit mode operates directly on paired Image IDs.<br>
 - The script has not been tested on really complex ROI patterns. There might be situations where the underlying `find_contours()` function from `scikit-image` will fail to produce an accurate Polygon ROI.<br>
 The underlying function to create Mask ROIs though is independent of shape complexity and might provide a good fallback option in this case.
 
@@ -76,4 +100,3 @@ The underlying function to create Mask ROIs though is independent of shape compl
 If you use the script and see room for improvement or have a special use case that is not covered by the generic code I wrote, please write an issue here at Github or contact me via mail or [Image.sc](https://forum.image.sc/).<br>
 I might implement some logic to artificially create a Polygon Shape from the Mask Shape the is created with `omero_rois` to better deal with complex ROI forms.<br>
 To make it more generic, there might also be the option to put in a regex pattern to determine the label images from the selection.
-
