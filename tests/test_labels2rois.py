@@ -283,8 +283,12 @@ def test_mask_shape_uses_translucent_explicit_fill_color(monkeypatch):
 def test_polygon_shape_uses_explicit_fill_and_stroke_colors(monkeypatch):
     created = []
 
-    def polygon(points, **kwargs):
-        created.append(kwargs)
+    def polygon(points, z=None, c=None, t=None, label=None,
+                fill_color=None, stroke_color=None, stroke_width=None):
+        created.append({
+            "fill_color": fill_color,
+            "stroke_color": stroke_color,
+        })
         return Mock()
 
     monkeypatch.setattr(labels.ez, "rois", SimpleNamespace(Polygon=polygon),
@@ -301,3 +305,79 @@ def test_polygon_shape_uses_explicit_fill_and_stroke_colors(monkeypatch):
     assert created[0]["stroke_color"] == (
         78, 121, 167, labels.POLYGON_STROKE_ALPHA)
     assert roi_ids == [501]
+
+
+def test_polygon_color_uses_legacy_post_roi_api_when_needed(monkeypatch):
+    created = []
+    posted = []
+
+    def polygon(points, z=None, c=None, t=None, label=None):
+        created.append({"points": points, "label": label})
+        return Mock()
+
+    def post_roi(conn, image_id, shapes, name=None, description=None,
+                 fill_color=(10, 10, 10, 10),
+                 stroke_color=(255, 255, 255, 255), stroke_width=1):
+        posted.append({
+            "fill_color": fill_color,
+            "stroke_color": stroke_color,
+        })
+        return 501
+
+    monkeypatch.setattr(labels.ez, "rois", SimpleNamespace(Polygon=polygon),
+                        raising=False)
+    monkeypatch.setattr(labels.ez, "post_roi", post_roi, raising=False)
+
+    roi_ids = labels.upload_polygon_rois(
+        {7: [[0, 0], [1, 0], [1, 1]]}, 21, Mock(), "cells",
+        roi_color=(78, 121, 167),
+    )
+
+    assert len(created) == 1
+    assert posted[0]["fill_color"] == (
+        78, 121, 167, labels.POLYGON_FILL_ALPHA)
+    assert posted[0]["stroke_color"] == (
+        78, 121, 167, labels.POLYGON_STROKE_ALPHA)
+    assert roi_ids == [501]
+
+
+def test_polygon_is_still_created_when_color_api_is_unavailable(monkeypatch):
+    posted = []
+
+    def polygon(points, z=None, c=None, t=None, label=None):
+        return Mock()
+
+    def post_roi(conn, image_id, shapes, name=None):
+        posted.append(shapes)
+        return 501
+
+    monkeypatch.setattr(labels.ez, "rois", SimpleNamespace(Polygon=polygon),
+                        raising=False)
+    monkeypatch.setattr(labels.ez, "post_roi", post_roi, raising=False)
+
+    roi_ids = labels.upload_polygon_rois(
+        {7: [[0, 0], [1, 0], [1, 1]]}, 21, Mock(), "cells",
+        roi_color=(78, 121, 167),
+    )
+
+    assert len(posted) == 1
+    assert roi_ids == [501]
+
+
+def test_polygon_creation_does_not_hide_unrelated_type_errors(monkeypatch):
+    def polygon(points, z=None, c=None, t=None, label=None,
+                fill_color=None, stroke_color=None):
+        raise TypeError("invalid polygon coordinates")
+
+    post_roi = Mock()
+    monkeypatch.setattr(labels.ez, "rois", SimpleNamespace(Polygon=polygon),
+                        raising=False)
+    monkeypatch.setattr(labels.ez, "post_roi", post_roi, raising=False)
+
+    with pytest.raises(TypeError, match="invalid polygon coordinates"):
+        labels.upload_polygon_rois(
+            {7: [[0, 0], [1, 0], [1, 1]]}, 21, Mock(), "cells",
+            roi_color=(78, 121, 167),
+        )
+
+    post_roi.assert_not_called()

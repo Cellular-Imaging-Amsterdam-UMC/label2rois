@@ -10,6 +10,7 @@ from omero.cmd import Delete2
 from omero.model import RoiI
 import time
 from collections import deque
+import inspect
 import re
 import sys
 
@@ -44,6 +45,17 @@ def rgba_to_int(red, green, blue, alpha):
     """Encode RGBA as the signed 32-bit integer used by OMERO Shapes."""
     value = (red << 24) | (green << 16) | (blue << 8) | alpha
     return value - 2 ** 32 if value > 2 ** 31 - 1 else value
+
+
+def supports_keyword_argument(callable_object, keyword):
+    """Return whether a callable accepts a named argument."""
+    try:
+        parameters = inspect.signature(callable_object).parameters
+    except (TypeError, ValueError):
+        return False
+    return (keyword in parameters or
+            any(parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()))
 
 
 def labels2rois(script_params, conn):
@@ -587,19 +599,40 @@ def upload_polygon_rois(contour_dict, parent_id, conn, clean_suffix, z=0, t=0,
                         roi_color=None):
     """Upload polygon-based ROIs."""
     new_rois = []
+    shape_supports_color = all(
+        supports_keyword_argument(ez.rois.Polygon, keyword)
+        for keyword in ("fill_color", "stroke_color")
+    )
+    post_supports_color = all(
+        supports_keyword_argument(ez.post_roi, keyword)
+        for keyword in ("fill_color", "stroke_color")
+    )
+    if roi_color:
+        fill_color = (*roi_color, POLYGON_FILL_ALPHA)
+        stroke_color = (*roi_color, POLYGON_STROKE_ALPHA)
+        if not shape_supports_color and not post_supports_color:
+            print("WARNING: This ezomero version cannot color polygons; "
+                  "creating polygons without the requested color.")
     
     for grey_value, coordinates in contour_dict.items():
         flipped = np.flip(coordinates)
         roi_name = f"{clean_suffix}_{grey_value}"
         shape_options = {}
-        if roi_color:
+        post_options = {}
+        if roi_color and shape_supports_color:
             shape_options = {
-                "fill_color": (*roi_color, POLYGON_FILL_ALPHA),
-                "stroke_color": (*roi_color, POLYGON_STROKE_ALPHA),
+                "fill_color": fill_color,
+                "stroke_color": stroke_color,
+            }
+        elif roi_color and post_supports_color:
+            post_options = {
+                "fill_color": fill_color,
+                "stroke_color": stroke_color,
             }
         shape = [ez.rois.Polygon(
             flipped, z=z, c=0, t=t, label=roi_name, **shape_options)]
-        roi_id = ez.post_roi(conn, int(parent_id), shape, name=roi_name)
+        roi_id = ez.post_roi(
+            conn, int(parent_id), shape, name=roi_name, **post_options)
         new_rois.append(roi_id)
     
     return new_rois
